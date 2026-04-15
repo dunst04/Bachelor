@@ -5,17 +5,22 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
 
 @with_kw struct HuggettEGM
     # Preferences
-    β = 0.96          # discount factor
-    γ = 2.0           # CRRA coefficient
+    β = 0.947          # discount factor
+    γ = 1.0           # CRRA coefficient
     u = γ == 1 ? (c -> log(c)) : (c -> (c^(1-γ) - 1) / (1-γ))
     u_prime = γ == 1 ? (c -> 1/c) : (c -> c^(-γ))
     u_prime_inv = γ == 1 ? (y -> 1/y) : (y -> y^(-1/γ))
 
 
     # Government
-    T = 0.3           # lump-sum tax per household
-    g = 0.31          # government spending (goods market: C + g = Y)
-    s = 0.01          # permanent deficit (g - T); government bond supply = s/r
+    T = 0.03           # lump-sum tax per household
+    g = 0.04           # government spending (goods market: C + g = Y)
+    s = T - g          # permanent surplus (T - g); s < 0 means deficit
+                       # steady-state bond supply: r*B = s  =>  B = s/r  (r<0 when s<0)
+
+    # Monetary policy (Taylor rule with ZLB)
+    π_star = 0.025     # inflation target (KNV: 2.5%)
+    φ_π    = 1.5       # Taylor coefficient (> 1: active MP away from ZLB)
 
     
     # Income process (Rouwenhorst discretization)
@@ -29,14 +34,14 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
     z_vec = exp.(mc_z.state_values) / sum(exp.(mc_z.state_values) .* λ_z)  # normalize mean to 1
     
     # Asset grid
-    ϕ =  2              # borrowing constraint
+    ϕ =  0.175              # borrowing constraint
     a_min = -ϕ           # minimum assets
-    a_max = 300.0        # maximum assets
-    N_a = 250            # grid points
-    
+    a_max = 10.0         # maximum assets — most mass is below 10, 300 wastes grid points
+    N_a = 300            # more points for smoother interpolation
+
     # Non-uniform grid using polynomial expansion (as in NGM)
     # Concentrates points near a_min where curvature is highest
-    θ = 5.0              # curvature parameter (higher = more concentration at lower bound)
+    θ = 4.0              # lower curvature: less extreme bunching, better coverage at high a
     ω = range(0, 1, length=N_a)
     a_vec = a_min .+ (a_max - a_min) .* ω.^θ
 end
@@ -280,82 +285,92 @@ end
 function excess_demand(r, model, w=1.0; verbose=false)
     """
     Compute excess demand for assets at interest rate r.
-    With government deficit s, steady-state bond supply = s/r.
-    Market clears when aggregate household savings = s/r.
+    s = surplus = T - g.  s < 0 means deficit.
+    Steady-state bond supply: r*B = s  =>  B = s/r.
+    With s < 0 (deficit), equilibria require r < 0 so that B = s/r > 0.
+    Market clears when aggregate household savings A(r) = s/r.
     """
-    # Solve household problem
     σ, _, _ = solve_hugget_egm(model, r, w, verbose=false)
-
-    # Compute stationary distribution
     λ, _, λ_a, _ = stationary_distribution(model, σ)
 
-    # Aggregate asset demand
     asset_demand = sum(model.a_vec .* λ_a)
-
-    # Government bond supply: in steady state, r*B = s  =>  B = s/r
-    bond_supply = -model.s / r
+    bond_supply  = model.s / r           # > 0 when s < 0 (deficit) and r < 0  [steady-state: r·B = s]
 
     excess = asset_demand - bond_supply
 
     if verbose
-        println("  r = $r => Asset demand = $(round(asset_demand,digits=4)), Bond supply (s/r) = $(round(bond_supply,digits=4)), Excess = $(round(excess,digits=4))")
+        @printf("  r = %.5f  A(r) = %.4f  B(r) = s/r = %.4f  excess = %.4f\n",
+                r, asset_demand, bond_supply, excess)
     end
 
     return excess
 end
 
-function find_equilibrium(model; r_min=-0.03, r_max=-0.0001, tol=1e-6, verbose=true)
+function find_all_equilibria(model; r_min=nothing, r_max=nothing, n_scan=80, tol=1e-6, w=1.0, verbose=true)
     """
-    Find market-clearing interest rate using bisection.
+    Scan r ∈ (r_min, r_max) for ALL sign changes of excess demand and bisect each one.
+
+    With a permanent deficit (s < 0), the bond supply B(r) = s/r is an upward-sloping
+    hyperbola for r < 0, just like household asset demand A(r).  Both curves are
+    increasing as r → 0⁻, and their two intersections give the two steady-state
+    equilibria at negative real rates (KNV 2026, Fig. 4a).
+
+    Government steady-state budget:  r·B = s  ⟹  B = s/r > 0 iff s<0 and r<0.
+
+    Returns: (r_eq_all, r_scan, excess_scan)
+      r_eq_all  — vector of all equilibrium interest rates found
+      r_scan    — scan grid used
+      excess    — excess demand evaluated on scan grid
     """
-    if verbose
-        println("\n=== Finding Equilibrium Interest Rate ===\n")
+    r_nat = 1/model.β - 1
+    # Default range: negative r for deficit, positive r for surplus
+    if isnothing(r_min)
+        r_min = model.s < 0 ? -0.30 : 0.001
     end
-    
-    # Check bounds
-    excess_min = excess_demand(r_min, model, verbose=verbose)
-    excess_max = excess_demand(r_max, model, verbose=verbose)
-    
-    if verbose
-        println("\nBounds check:")
-        println("  At r = $r_min: excess demand = $excess_min")
-        println("  At r = $r_max: excess demand = $excess_max")
+    if isnothing(r_max)
+        r_max = model.s < 0 ? -0.001 : r_nat - 0.002
     end
-    
-    if excess_min * excess_max > 0
-        error("Bounds do not bracket equilibrium. Adjust r_min and r_max.")
+
+    verbose && println("\n=== Scanning for equilibria, r ∈ ($(round(r_min,digits=4)), $(round(r_max, digits=4))) ===")
+
+    r_scan    = range(r_min, r_max, length=n_scan)
+    excess    = zeros(length(r_scan))
+
+    for (i, r) in enumerate(r_scan)
+        excess[i] = excess_demand(r, model, w, verbose=verbose)
     end
-    
-    # Bisection
-    iter = 1
-    r_eq = (r_min + r_max) / 2
-    
-    while (r_max - r_min) > tol && iter < 100
-        r_eq = (r_min + r_max) / 2
-        excess = excess_demand(r_eq, model, verbose=false)
-        
-        if verbose && iter % 5 == 0
-            println("Iteration $iter: r = $(round(r_eq, digits=6)), excess = $(round(excess, digits=6))")
+
+    # Bisect every interval where excess demand changes sign
+    r_eq_all = Float64[]
+    for i in 1:length(r_scan)-1
+        if excess[i] * excess[i+1] < 0
+            r_lo, r_hi = r_scan[i], r_scan[i+1]
+            e_lo = excess[i]
+            for _ in 1:80
+                r_mid = (r_lo + r_hi) / 2
+                e_mid = excess_demand(r_mid, model, w, verbose=false)
+                abs(e_mid) < tol && (r_lo = r_hi = r_mid; break)
+                e_lo * e_mid < 0 ? (r_hi = r_mid) : (r_lo = r_mid; e_lo = e_mid)
+            end
+            push!(r_eq_all, (r_lo + r_hi) / 2)
         end
-        
-        if abs(excess) < tol
-            break
-        end
-        
-        if excess > 0
-            r_max = r_eq
+    end
+
+    if verbose
+        println()
+        if isempty(r_eq_all)
+            println("No equilibrium found — adjust r range or deficit size.")
         else
-            r_min = r_eq
+            println("Found $(length(r_eq_all)) equilibrium/equilibria:")
+            for (k, r_eq) in enumerate(r_eq_all)
+                B_eq = model.s / r_eq
+                @printf("  r*_%d = %.5f   B* = s/r = %.4f   debt/income = %.4f\n",
+                        k, r_eq, B_eq, B_eq)
+            end
         end
-        
-        iter += 1
     end
-    
-    if verbose
-        println("\nEquilibrium found: r* = $(round(r_eq, digits=6))")
-    end
-    
-    return r_eq
+
+    return r_eq_all, collect(r_scan), excess
 end
 
 ### EULER EQUATION RESIDUALS
@@ -527,65 +542,102 @@ function plot_euler_residuals(model, σ, r, w; test_grid=nothing, title_suffix="
 end
 
 
-function plot_supply_demand(model; r_vec=range(-0.01, 0.04, length=30), w=1.0)
+function plot_supply_demand(model; r_min=nothing, r_max=nothing, n_scan=80, w=1.0)
     """
-    Plot asset demand A(r) and government bond supply s/r as functions of r.
-    Equilibrium is where they intersect.
-
-    Government bond supply in steady state: B = s/r  (r*B = s, Ponzi-free condition).
-    Goods market clearing: C + g = Y  (verified in aggregate).
+    Plot asset demand A(r) and bond supply B(r) = s/r.
+    s = surplus = T - g; s < 0 means permanent deficit.
+    With a deficit and r < 0, both curves are upward-sloping and can cross twice,
+    yielding two steady-state equilibria (KNV 2026, Fig. 4a).
     """
-    println("\n=== Computing Supply-Demand Curves ===")
+    r_nat = 1/model.β - 1
+    if isnothing(r_min); r_min = model.s < 0 ? -0.30 : 0.001; end
+    if isnothing(r_max); r_max = model.s < 0 ? -0.001 : r_nat - 0.002; end
 
-    # --- Asset demand curve A(r) ---
-    demand = zeros(length(r_vec))
-    for (i, r) in enumerate(r_vec)
-        σ, _, _ = solve_hugget_egm(model, r, w, verbose=false)
-        _, _, λ_a, _ = stationary_distribution(model, σ)
-        demand[i] = sum(model.a_vec .* λ_a)
-        @printf("  r = %.4f  =>  A(r) = %.4f  |  s/r = %.4f\n", r, demand[i], model.s/r)
-    end
+    r_eq_all, r_scan, excess = find_all_equilibria(model;
+        r_min=r_min, r_max=r_max, n_scan=n_scan, w=w, verbose=true)
 
-    # --- Bond supply curve s/r ---
-    supply = model.s ./ r_vec
+    demand = excess .+ (model.s ./ r_scan)    # A(r) = excess + B(r)
+    supply = model.s ./ r_scan                # B(r) = s/r
 
-    # --- Find equilibrium (where demand ≈ supply) ---
-    diff = demand .- supply
-    # sign change between consecutive points
-    eq_idx = findfirst(i -> diff[i] * diff[i+1] <= 0, 1:length(diff)-1)
-
-    if !isnothing(eq_idx)
-        # Linear interpolation for crossing point
-        r_lo, r_hi = r_vec[eq_idx], r_vec[eq_idx+1]
-        d_lo, d_hi = diff[eq_idx], diff[eq_idx+1]
-        r_eq = r_lo - d_lo * (r_hi - r_lo) / (d_hi - d_lo)
-        A_eq = demand[eq_idx] + (demand[eq_idx+1] - demand[eq_idx]) *
-               (r_eq - r_lo) / (r_hi - r_lo)
-        println("\nEquilibrium (from plot): r* ≈ $(round(r_eq, digits=5)),  A* ≈ $(round(A_eq, digits=4))")
-    else
-        r_eq, A_eq = NaN, NaN
-        println("\nWarning: no sign change found in r_vec — expand range.")
-    end
-
-    # --- Plot ---
-    p = plot(r_vec, demand,
+    p = plot(r_scan, demand,
              label="Asset demand  A(r)",
              lw=2, color=:steelblue,
              xlabel="Interest rate  r",
-             ylabel="Assets",
-             title="Huggett Model with Government\nAsset Market: Supply vs Demand")
+             ylabel="Assets / bonds",
+             title="Huggett with Government — Supply vs Demand\n(s = surplus = $(round(model.s, digits=4)), deficit = $(round(-model.s, digits=4)))")
 
-    plot!(p, r_vec, supply,
-          label="Bond supply  s/r  (s=$(model.s), deficit=$(round(model.g - model.T, digits=4)))",
+    plot!(p, r_scan, supply,
+          label="Bond supply  B(r) = s/r",
           lw=2, color=:tomato, linestyle=:dash)
 
-    if !isnan(r_eq)
-        scatter!(p, [r_eq], [A_eq],
-                 label="Equilibrium  (r*=$(round(r_eq,digits=4)), A*=$(round(A_eq,digits=3)))",
-                 markersize=8, color=:black, markershape=:star5)
+    colors = [:black, :darkgreen, :purple]
+    for (k, r_eq) in enumerate(r_eq_all)
+        B_eq = model.s / r_eq
+        scatter!(p, [r_eq], [B_eq],
+                 label="Eq. $k: r*=$(round(r_eq, digits=4)), B*=$(round(B_eq, digits=3))",
+                 markersize=10, color=colors[mod1(k, length(colors))], markershape=:star5)
     end
 
-    hline!(p, [0.0], color=:gray, linestyle=:dot, label="")
+    vline!(p, [r_nat], color=:purple, linestyle=:dot, lw=1.5,
+           label="Natural rate  1/β−1 = $(round(r_nat, digits=4))")
+    hline!(p, [0.0], color=:gray, linestyle=:dot, lw=1, label="")
 
-    return p, r_eq, A_eq
+    return p, r_eq_all
+end
+
+### NOMINAL EQUILIBRIA (Taylor Rule + ZLB)
+
+function nominal_equilibria(model, r_eq; verbose=true)
+    """
+    Given the real equilibrium r* (from Huggett), find the two nominal
+    steady states from the Taylor rule + zero lower bound.
+
+    Fisher equation:  i = r* + π        (r* pinned by real side)
+    Taylor rule:      i = max(0, r* + π* + φ_π*(π - π*))
+
+    Intersections of the two lines give steady-state inflations:
+      Eq. 1 (intended):  π₁ = π*             i₁ = r* + π*
+      Eq. 2 (ZLB trap):  π₂ = -r*            i₂ = 0
+    (Benhabib, Schmitt-Grohé & Uribe 2001)
+    """
+    @unpack π_star, φ_π = model
+
+    π₁, i₁ = π_star,  r_eq + π_star   # target equilibrium
+    π₂, i₂ = -r_eq,   0.0             # ZLB deflationary trap
+
+    if verbose
+        println("\n=== Nominal Equilibria (Taylor Rule + ZLB) ===")
+        @printf("  Real rate (from Huggett):  r* = %.4f\n\n", r_eq)
+        if i₁ >= 0.0
+            @printf("  Eq. 1 — Target:    π = %+.4f   i = %.4f\n", π₁, i₁)
+        else
+            @printf("  Eq. 1 — Target:    π = %+.4f   i = %.4f  (below ZLB — not achievable with i≥0)\n", π₁, i₁)
+        end
+        if r_eq < 0
+            @printf("  Eq. 2 — ZLB:       π = %+.4f   i = %.4f  (inflationary ZLB trap, r*<0)\n", π₂, i₂)
+        else
+            @printf("  Eq. 2 — ZLB trap:  π = %+.4f   i = %.4f  (deflationary)\n", π₂, i₂)
+        end
+    end
+
+    # Plot: Taylor rule and Fisher line vs inflation
+    π_lo   = min(π₁, π₂) - 0.01
+    π_hi   = max(π₁, π₂) + 0.01
+    π_grid = range(π_lo, π_hi, length=300)
+    taylor  = [max(0.0, r_eq + π_star + φ_π*(π - π_star)) for π in π_grid]
+    fisher  = [r_eq + π for π in π_grid]
+
+    p = plot(collect(π_grid), taylor,
+             lw=2, color=:steelblue, label="Taylor rule  i = max(0, r*+π*+φ(π−π*))",
+             xlabel="Inflation  π", ylabel="Nominal rate  i",
+             title="Nominal Equilibria: Taylor Rule + Fisher Equation")
+    plot!(p, collect(π_grid), fisher,
+          lw=2, color=:tomato, linestyle=:dash, label="Fisher line  i = r* + π")
+    hline!(p, [0.0], color=:gray, linestyle=:dot, lw=1, label="ZLB  i = 0")
+    scatter!(p, [π₁], [i₁], markersize=10, color=:black,   markershape=:star5,
+             label="Eq. 1 (target):  π=$(round(π₁,digits=3)), i=$(round(i₁,digits=3))")
+    scatter!(p, [π₂], [i₂], markersize=10, color=:darkgreen, markershape=:diamond,
+             label="Eq. 2 (ZLB):    π=$(round(π₂,digits=3)), i=$(round(i₂,digits=3))")
+
+    return (π₁, i₁), (π₂, i₂), p
 end

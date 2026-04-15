@@ -14,40 +14,14 @@ println("  Asset grid: [$(model.a_min), $(model.a_max)] with $(model.N_a) points
 println("  Income states: $(model.N_z)")
 println("\nProductivity grid: ", round.(model.z_vec, digits=4))
 
-# Solve at initial guess r = 0.01
-r_guess = 0.01
-w = 1.0
-
-println("\n=== Solving at r = $r_guess ===\n")
-@time σ_egm, iter_egm, err_egm = solve_hugget_egm(model, r_guess, w)
-
-# Plot policy function
-p_policy = plot_policy_function(model, σ_egm, title_suffix=" (r=$r_guess)")
-display(p_policy)
-
-# Compute distributions
-λ_egm, _, λ_a_egm, λ_z_egm = stationary_distribution(model, σ_egm)
-
-p_dist_a, p_dist_z = plot_distributions(model, λ_a_egm, λ_z_egm, r_label=" (r=$r_guess)")
-display(plot(p_dist_a, p_dist_z, layout=(1,2), size=(1000, 400)))
-
-# Asset demand at r_guess
-asset_demand = sum(model.a_vec .* λ_a_egm)
-println("\nAt r = $r_guess:")
-println("  Mean assets: $(round(asset_demand, digits=4))")
-println("  Excess demand: $(round(asset_demand, digits=4)) (should be ≈ 0 at equilibrium)")
-
-# Euler equation residuals for r_guess
-println("\n=== Euler Equation Residuals (r = $r_guess) ===\n")
-p_euler_zoom, p_euler_full = plot_euler_residuals(model, σ_egm, r_guess, w,
-                                                   title_suffix=" (r=$r_guess)")
-display(plot(p_euler_zoom, p_euler_full, layout=(1,2), size=(1400, 500)))
-
 ### ASSET DEMAND CURVE
-
+w=1.0
 println("\n=== Computing Asset Demand Curve ===\n")
 
-r_test_grid = range(-0.2, 0.04, length=15)
+r_natural = 1/model.β - 1
+r_test_grid = vcat(range(-0.05, -0.001, length=40),
+                   range(0.001, 0.95 * r_natural, length=6))
+r_test_grid = collect(r_test_grid)
 mean_assets_test = zeros(length(r_test_grid))
 
 println("Computing asset demand for different interest rates...")
@@ -59,15 +33,88 @@ for (i, r) in enumerate(r_test_grid)
     println("mean assets = $(round(mean_assets_test[i], digits=4))")
 end
 
-p_demand = plot(mean_assets_test, r_test_grid, ylabel="Interest rate r", xlabel="Mean assets",
-                title="Asset Demand Curve", lw=2, marker=:circle, legend=:topright,
-                label="Asset demand")
-vline!(p_demand, [0], color=:red, linestyle=:dash, lw=2, label="Market clearing (supply = 0)")
+# Bond supply curve B(r) = s/r only exists for r < 0
+negative_idx = r_test_grid .< 0
+r_supply_grid = r_test_grid[negative_idx]
+bond_supply_test = model.s ./ r_supply_grid
 
-# Add r = 1/β - 1 reference line
-r_natural = 1/model.β - 1
+# Find all equilibria using the pre-computed demand curve (no re-solving!)
+println("\n=== Finding Equilibria ===")
+r_equilibria = find_equilibria(model, r_supply_grid, mean_assets_test[negative_idx])
+
+# Plot (x = assets/bonds, y = r)
+p_demand = plot(mean_assets_test, collect(r_test_grid),
+                ylabel="Interest rate r", xlabel="Assets / bonds",
+                title="Asset Demand and Bond Supply  (s = $(model.s))",
+                lw=2, color=:steelblue, legend=:bottomright, label="Asset demand  A(r)")
+plot!(p_demand, bond_supply_test, r_supply_grid,
+      lw=2, color=:tomato, linestyle=:dash, label="Bond supply  B(r) = s/r")
+
+for (k, r_eq) in enumerate(r_equilibria)
+    scatter!(p_demand, [model.s / r_eq], [r_eq],
+             markersize=4, color=:red, markershape=:circle,
+             label="Eq. $k: r* = $(round(r_eq, digits=4))")
+end
+
 hline!(p_demand, [r_natural], color=:purple, linestyle=:dot, lw=2,
        label="r = 1/β - 1 = $(round(r_natural, digits=4))")
+hline!(p_demand, [0], color=:gray, linestyle=:dot, lw=1, label="r = 0")
 
 display(p_demand)
+
+
+### MAXIMAL DEFICIT (MINIMAL s) VIA BISECTION
+
+println("\n=== Finding Maximal Deficit (Minimal s) via Bisection ===\n")
+
+# A(r) is independent of s — reuse the pre-computed demand curve.
+# find_equilibria uses model.s only for the supply curve B(r) = s/r.
+demand_neg = mean_assets_test[negative_idx]
+
+# Bracket: s_lo → 2 equilibria, s_hi → 0 equilibria (given)
+s_lo_b, s_hi_b = -0.02, -0.03
+
+n_iter_s = 0
+while abs(s_hi_b - s_lo_b) > 1e-10
+    s_mid = (s_lo_b + s_hi_b) / 2
+    r_eq = find_equilibria(HuggettEGM(s=s_mid), r_supply_grid, demand_neg, verbose=false)
+    length(r_eq) == 2 ? (s_lo_b = s_mid) : (s_hi_b = s_mid)
+    n_iter_s += 1; n_iter_s >= 200 && break
+end
+
+s_critical = (s_lo_b + s_hi_b) / 2
+r_eq_crit  = find_equilibria(HuggettEGM(s=s_lo_b), r_supply_grid, demand_neg, verbose=false)
+r_crit = mean(r_eq_crit)
+
+println("Converged in $n_iter_s iterations")
+@printf("Maximal deficit  -s* =  %.10f\n", -s_critical)
+@printf("r*       ≈  %.6f\n\n", mean(r_eq_crit))
+
+# Plot demand and supply for the critical surplus value
+bond_supply_critical = s_critical ./ r_supply_grid
+p_demand_critical = plot(mean_assets_test, r_test_grid,
+                 ylabel="Interest rate r", xlabel="Assets / bonds",
+                 title="Asset Demand and Bond Supply  (s = $(round(s_critical, digits=6)))",
+                 lw=2, color=:steelblue, legend=:topright, label="Asset demand  A(r)")
+plot!(p_demand_critical, bond_supply_critical, r_supply_grid,
+    lw=2, color=:tomato, linestyle=:dash, label="Bond supply  B(r) = s*/r")
+
+for (k, r_eq) in enumerate(r_eq_crit)
+    scatter!(p_demand_critical, [s_critical / r_eq], [r_eq],
+         markersize=4, color=:red, markershape=:circle,
+         label="Critical Eq. $k: r* = $(round(r_eq, digits=4))")
+end
+
+hline!(p_demand_critical, [r_natural], color=:purple, linestyle=:dot, lw=2,
+     label="r = 1/β - 1 = $(round(r_natural, digits=4))")
+hline!(p_demand_critical, [0], color=:gray, linestyle=:dot, lw=1, label="r = 0")
+
+display(p_demand_critical)
+
+solve_and_plot_equilibrium(HuggettEGM(s=s_critical), r_crit, w, verbose=false)
+#ASSET DEMAND CURVE
+
+
+
+
 

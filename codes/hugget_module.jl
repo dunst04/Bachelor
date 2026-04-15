@@ -12,20 +12,25 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
     u_prime_inv = γ == 1 ? (y -> 1/y) : (y -> y^(-1/γ))
     
     # Income process (Rouwenhorst discretization)
-    ρ_z = 0.90                    # persistence
-    ν_z = sqrt(0.125)             # volatility
+    ρ_z = 0.897                    # persistence
+    ν_z = sqrt(0.027)             # volatility
     μ = 0.0                       # mean of log(z)
     N_z = 5                       # number of states
     mc_z = rouwenhorst(N_z, ρ_z, ν_z, μ)
     λ_z = stationary_distributions(mc_z)[1]
     P_z = mc_z.p
     z_vec = exp.(mc_z.state_values) / sum(exp.(mc_z.state_values) .* λ_z)  # normalize mean to 1
-    
+
     # Asset grid
-    ϕ =  2              # borrowing constraint
+    ϕ =  0.175              # borrowing constraint
     a_min = -ϕ           # minimum assets
-    a_max = 300.0        # maximum assets
-    N_a = 250            # grid points
+    a_max = 10.0        # maximum assets
+    N_a = 400            # grid points
+
+    #government
+    T = 0.0 #lump-sum tax
+    g = 0.004 #government spending
+    s = T - g #government surplus
     
     # Non-uniform grid using polynomial expansion (as in NGM)
     # Concentrates points near a_min where curvature is highest
@@ -46,7 +51,7 @@ function egm_iteration(σ_old, model, r, w)
     3. Back out endogenous asset grid: a = (c + a' - wz)/(1+r)
     4. Interpolate back to exogenous grid
     """
-    @unpack N_a, N_z, a_vec, z_vec, P_z, β, u_prime, u_prime_inv, a_min, a_max = model
+    @unpack N_a, N_z, a_vec, z_vec, P_z, β, u_prime, u_prime_inv, a_min, a_max, T = model
     
     σ_new = zeros(N_a, N_z)
     
@@ -65,7 +70,7 @@ function egm_iteration(σ_old, model, r, w)
                 a_next_next = σ_interps[iz_next](a_next)
                 
                 # Consumption tomorrow
-                c_next = (1+r)*a_next + w*z_next - a_next_next
+                c_next = (1+r)*a_next + w*z_next - T - a_next_next
                 
                 if c_next > 0
                     EMU_next[ia_next] += P_z[iz, iz_next] * u_prime(c_next)
@@ -87,7 +92,7 @@ function egm_iteration(σ_old, model, r, w)
                 # Step 3: Back out endogenous asset level today
                 # Budget: (1+r)*a + w*z = c + a'
                 # => a = (c + a' - w*z)/(1+r)
-                a_endog[ia_next] = (c_endog[ia_next] + a_next - w*z) / (1+r)
+                a_endog[ia_next] = (c_endog[ia_next] + a_next - w*z + T) / (1+r)
                 
                 valid[ia_next] = true 
             end
@@ -282,68 +287,59 @@ function excess_demand(r, model, w=1.0; verbose=false)
     # Aggregate asset demand
     asset_demand = sum(model.a_vec .* λ_a)
     
-    # Asset supply is zero in Huggett model (no production, bonds in zero net supply)
-    excess = asset_demand - 0.0
-    
+    # Bond supply: steady-state government budget  r·B = s  =>  B = s/r
+    bond_supply = model.s / r
+
+    #excess demand 
+    excess = asset_demand - bond_supply
+
     if verbose
-        println("  r = $r => Asset demand = $asset_demand, Excess demand = $excess")
+        @printf("  r = %.5f  A(r) = %.4f  B(r) = s/r = %.4f  excess = %.4f\n",
+                r, asset_demand, bond_supply, excess)
     end
-    
+
     return excess
 end
 
-function find_equilibrium(model; r_min=-0.02, r_max=0.04, tol=1e-6, verbose=true)
+function find_equilibria(model, r_grid, mean_assets; tol=1e-6, w=1.0, verbose=true)
     """
-    Find market-clearing interest rate using bisection.
+    Find all market-clearing interest rates using a pre-computed asset demand curve.
+
+    Supply curve: B(r) = s/r  (s = T - g; s < 0 → deficit financed by bonds).
+    Scans for sign changes of excess demand  A(r) - B(r)  and bisects each interval.
+    Returns a vector with 0, 1, or 2 equilibrium interest rates.
     """
-    if verbose
-        println("\n=== Finding Equilibrium Interest Rate ===\n")
-    end
-    
-    # Check bounds
-    excess_min = excess_demand(r_min, model, verbose=verbose)
-    excess_max = excess_demand(r_max, model, verbose=verbose)
-    
-    if verbose
-        println("\nBounds check:")
-        println("  At r = $r_min: excess demand = $excess_min")
-        println("  At r = $r_max: excess demand = $excess_max")
-    end
-    
-    if excess_min * excess_max > 0
-        error("Bounds do not bracket equilibrium. Adjust r_min and r_max.")
-    end
-    
-    # Bisection
-    iter = 1
-    r_eq = (r_min + r_max) / 2
-    
-    while (r_max - r_min) > tol && iter < 100
-        r_eq = (r_min + r_max) / 2
-        excess = excess_demand(r_eq, model, verbose=false)
-        
-        if verbose && iter % 5 == 0
-            println("Iteration $iter: r = $(round(r_eq, digits=6)), excess = $(round(excess, digits=6))")
+    r_grid  = collect(r_grid)
+    supply  = model.s ./ r_grid
+    excess  = mean_assets .- supply
+
+    r_eq_all = Float64[]
+    for i in 1:length(r_grid)-1
+        if excess[i] * excess[i+1] < 0
+            r_lo, r_hi = r_grid[i], r_grid[i+1]
+            e_lo = excess[i]
+            for _ in 1:80
+                r_mid = (r_lo + r_hi) / 2
+                e_mid = excess_demand(r_mid, model, w, verbose=false)
+                abs(e_mid) < tol && (r_lo = r_hi = r_mid; break)
+                e_lo * e_mid < 0 ? (r_hi = r_mid) : (r_lo = r_mid; e_lo = e_mid)
+            end
+            push!(r_eq_all, (r_lo + r_hi) / 2)
         end
-        
-        if abs(excess) < tol
-            break
-        end
-        
-        if excess > 0
-            r_max = r_eq
+    end
+
+    if verbose
+        if isempty(r_eq_all)
+            println("No equilibrium found in scanned range.")
         else
-            r_min = r_eq
+            println("Found $(length(r_eq_all)) equilibrium/equilibria:")
+            for (k, r_eq) in enumerate(r_eq_all)
+                @printf("  Eq. %d: r* = %.5f   B* = s/r = %.4f\n", k, r_eq, model.s / r_eq)
+            end
         end
-        
-        iter += 1
     end
-    
-    if verbose
-        println("\nEquilibrium found: r* = $(round(r_eq, digits=6))")
-    end
-    
-    return r_eq
+
+    return r_eq_all
 end
 
 ### EULER EQUATION RESIDUALS
@@ -355,7 +351,7 @@ function euler_residuals(model, σ, r, w; test_grid=nothing)
     Euler equation: u'(c) = β(1+r) * E[u'(c')]
     Residual: percentage error in consumption implied by Euler equation
     """
-    @unpack a_vec, z_vec, P_z, N_z, β, u_prime, u_prime_inv = model
+    @unpack a_vec, z_vec, P_z, N_z, β, u_prime, u_prime_inv, T = model
     
     # Create test grid if not provided
     if isnothing(test_grid)
@@ -370,15 +366,15 @@ function euler_residuals(model, σ, r, w; test_grid=nothing)
         
         for (ia, a) in enumerate(test_grid)
             a_next = σ_interp(a)
-            c = (1+r)*a + w*z - a_next
-            
+            c = (1+r)*a + w*z - T - a_next
+
             if c > 0
                 euler_rhs = 0.0
                 for iz_next in 1:N_z
                     z_next = z_vec[iz_next]
                     σ_next_interp = LinearInterpolation(a_vec, σ[:, iz_next], extrapolation_bc=Line())
                     a_next_next = σ_next_interp(a_next)
-                    c_next = (1+r)*a_next + w*z_next - a_next_next
+                    c_next = (1+r)*a_next + w*z_next - T - a_next_next
                     
                     if c_next > 0
                         euler_rhs += P_z[iz, iz_next] * u_prime(c_next)
@@ -512,4 +508,32 @@ function plot_euler_residuals(model, σ, r, w; test_grid=nothing, title_suffix="
     println()
     
     return p_zoom, p_full
+end
+
+function solve_and_plot_equilibrium(model, r, w=1.0; verbose=true)
+        """
+        Solve the household problem for a single interest rate and display
+        the policy function, distributions, and Euler residuals in separate figures.
+        Returns a named tuple with all computed objects.
+        """
+        label = "r*=$(round(r, digits=4))"
+        verbose && println("\n--- $label ---")
+
+        σ, _, _ = solve_hugget_egm(model, r, w, verbose=verbose)
+        λ, _, λ_a, λ_z = stationary_distribution(model, σ)
+
+        p_pol = plot_policy_function(model, σ, title_suffix=" — $label")
+        display(p_pol)
+
+        p_dist_a, p_dist_z = plot_distributions(model, λ_a, λ_z, r_label=" — $label")
+        display(p_dist_a)
+        display(p_dist_z)
+
+        p_euler_z, p_euler = plot_euler_residuals(model, σ, r, w, title_suffix=" — $label")
+        display(p_euler_z)
+        display(p_euler)
+
+        return (r=r, σ=σ, λ_a=λ_a, λ_z=λ_z,
+                        p_policy=p_pol, p_dist_a=p_dist_a, p_dist_z=p_dist_z,
+                        p_euler_zoom=p_euler_z, p_euler_full=p_euler)
 end
