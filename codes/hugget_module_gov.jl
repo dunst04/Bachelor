@@ -25,9 +25,9 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
     
     # Income process (Rouwenhorst discretization)
     ρ_z = 0.90                    # persistence
-    ν_z = sqrt(0.125)             # volatility
+    ν_z = sqrt(0.25)             # volatility
     μ = 0.0                       # mean of log(z)
-    N_z = 5                       # number of states
+    N_z = 6                       # number of states
     mc_z = rouwenhorst(N_z, ρ_z, ν_z, μ)
     λ_z = stationary_distributions(mc_z)[1]
     P_z = mc_z.p
