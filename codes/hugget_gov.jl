@@ -53,7 +53,7 @@ display(plot(p_euler_zoom, p_euler_full, layout=(1,2), size=(1400, 500)))
 
 println("\n=== Computing Asset Supply vs Demand Curve ===\n")
 
-r_test_grid = range(-0.04, -0.001, length=20)
+r_test_grid = range(-0.2, -0.001, length=20)
 mean_assets_test = zeros(length(r_test_grid))
 
 println("Computing asset demand for different interest rates...")
@@ -108,3 +108,5 @@ hline!(p_demand, [r_natural], color=:purple, linestyle=:dot, lw=2,
        label="r = 1/β - 1 = $(round(r_natural, digits=4))")
 
 display(p_demand)
+
+#find_equilibrium(model)

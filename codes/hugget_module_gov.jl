@@ -5,7 +5,7 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
 
 @with_kw struct HuggettEGM
     # Preferences
-    β = 0.96          # discount factor
+    β = 0.98          # discount factor
     γ = 2.0           # CRRA coefficient
     u = γ == 1 ? (c -> log(c)) : (c -> (c^(1-γ) - 1) / (1-γ))
     u_prime = γ == 1 ? (c -> 1/c) : (c -> c^(-γ))
@@ -13,16 +13,16 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
 
 
     # Government
-    T = 0.3           # lump-sum tax per household
-    g = 0.31          # government spending (goods market: C + g = Y)
-    s = 0.01          # permanent deficit (g - T); government bond supply = s/r
+    T = 0.01           # lump-sum tax per household
+    g = 0.005          # government spending (goods market: C + g = Y)
+    s = -0.005          # permanent deficit (g - T); government bond supply = s/r
 
     
     # Income process (Rouwenhorst discretization)
     ρ_z = 0.90                    # persistence
-    ν_z = sqrt(0.125)             # volatility
+    ν_z = sqrt(0.25)             # volatility
     μ = 0.0                       # mean of log(z)
-    N_z = 5                       # number of states
+    N_z = 6                       # number of states
     mc_z = rouwenhorst(N_z, ρ_z, ν_z, μ)
     λ_z = stationary_distributions(mc_z)[1]
     P_z = mc_z.p

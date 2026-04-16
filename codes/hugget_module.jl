@@ -292,7 +292,7 @@ function excess_demand(r, model, w=1.0; verbose=false)
     return excess
 end
 
-function find_equilibrium(model; r_min=-0.02, r_max=0.04, tol=1e-6, verbose=true)
+function find_equilibrium(model; r_min=-0.06, r_max=0.04, tol=1e-6, verbose=true)
     """
     Find market-clearing interest rate using bisection.
     """
