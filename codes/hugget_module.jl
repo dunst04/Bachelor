@@ -1,7 +1,10 @@
-# Huggett Model with Endogenous Grid Method (EGM)
-# Incomplete markets, idiosyncratic income risk, no production
+#initial version of the code was a course material for Quant Econ class by Piotr Zoch
+#whom I would like to thank
+#source: https://github.com/pzoch/QEcon2025
 
-using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics, ColorSchemes, Plots, Parameters, Printf
+# Huggett Model with Endogenous Grid Method (EGM)
+
+using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics, ColorSchemes, Plots, Parameters, Printf, LaTeXStrings
 
 @with_kw struct HuggettEGM
     # Preferences
@@ -24,8 +27,8 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
     # Asset grid
     ϕ =  0.175              # borrowing constraint
     a_min = -ϕ           # minimum assets
-    a_max = 10.0        # maximum assets
-    N_a = 400            # grid points
+    a_max = 30.0        # maximum assets
+    N_a = 500            # grid points
 
     #government
     T = 0.0 #lump-sum tax
@@ -396,31 +399,43 @@ end
 
 ### PLOTTING FUNCTIONS
 
-function plot_policy_function(model, σ; n_plot=125, title_suffix="")
-    """Plot policy function for all productivity states."""
+function plot_policy_function(model, σ; a_plot_max=5.0, title_suffix="")
     lines_scheme = get(ColorSchemes.thermal, LinRange(0.2, 0.8, model.N_z))
     
-    p = plot(title="Policy Function$title_suffix", xlabel="a", ylabel="a′")
+    plot_grid = collect(range(model.a_min, a_plot_max, length=500))
+
+    p = plot(title="Policy Function$title_suffix", xlabel=L"a", ylabel=L"a′", guidefont =font(16))
     for iz in 1:model.N_z
-        plot!(p, model.a_vec[1:n_plot], σ[1:n_plot, iz], 
+        σ_interp = LinearInterpolation(model.a_vec, σ[:, iz], extrapolation_bc=Line())
+        plot!(p, plot_grid, σ_interp.(plot_grid), 
               label="z=$(round(model.z_vec[iz], digits=3))", 
               color=lines_scheme[iz], lw=2)
     end
-    plot!(p, model.a_vec[1:n_plot], model.a_vec[1:n_plot], 
-          label="45°", color=:black, linestyle=:dash)
+    plot!(p, plot_grid, plot_grid, label="45°", color=:black, linestyle=:dash)
     
     return p
 end
 
-function plot_distributions(model, λ_a, λ_z; r_label="")
+function plot_distributions(model, λ_a, λ_z; r_label="", cdf_pct=0.99, ylim_zoom=0.05)
     """Plot asset and income distributions."""
-    p1 = plot(model.a_vec, λ_a, xlabel="a", ylabel="λ(a)", 
-              title="Asset Distribution$r_label", legend=false, lw=2)
-    
-    p2 = plot(model.z_vec, λ_z, xlabel="z", ylabel="λ(z)", 
-              title="Income Distribution", legend=false, lw=2, marker=:circle)
-    
-    return p1, p2
+    p1 = plot(model.a_vec, λ_a, xlabel=L"a", ylabel=L"\mu_a(a)",
+            legend=false, lw=2, guidefont=font(16))
+
+    p2 = plot(model.z_vec, λ_z, xlabel=L"z", ylabel=L"\mu_z(z)",
+        legend=false, lw=2, linestyle=:dash, marker=:circle, guidefont=font(16))
+
+        # Zoomed asset distribution: x-axis up to cdf_pct percentile, y-axis capped at ylim_zoom
+    cdf_a = cumsum(vec(λ_a))
+    idx_pct = something(findfirst(x -> x >= cdf_pct, cdf_a), length(cdf_a))
+    a_pct = model.a_vec[idx_pct]
+
+    p3 = plot(model.a_vec[1:idx_pct], vec(λ_a)[1:idx_pct],
+            xlabel=L"a", ylabel=L"\mu_a(a)",
+            title="$(Int(cdf_pct*100))% CDF $r_label",
+            legend=false, lw=2, ylims=(0, ylim_zoom), xlims=(model.a_vec[1], a_pct), guidefont=font(16))
+
+
+    return p1, p2, p3
 end
 
 function plot_euler_residuals(model, σ, r, w; test_grid=nothing, title_suffix="")
@@ -525,9 +540,10 @@ function solve_and_plot_equilibrium(model, r, w=1.0; verbose=true)
         p_pol = plot_policy_function(model, σ, title_suffix=" — $label")
         display(p_pol)
 
-        p_dist_a, p_dist_z = plot_distributions(model, λ_a, λ_z, r_label=" — $label")
+        p_dist_a, p_dist_z, p_dist_a_zoom = plot_distributions(model, λ_a, λ_z, r_label=" — $label")
         display(p_dist_a)
         display(p_dist_z)
+        display(p_dist_a_zoom)
 
         p_euler_z, p_euler = plot_euler_residuals(model, σ, r, w, title_suffix=" — $label")
         display(p_euler_z)
@@ -535,5 +551,6 @@ function solve_and_plot_equilibrium(model, r, w=1.0; verbose=true)
 
         return (r=r, σ=σ, λ_a=λ_a, λ_z=λ_z,
                         p_policy=p_pol, p_dist_a=p_dist_a, p_dist_z=p_dist_z,
+                        p_dist_a_zoom=p_dist_a_zoom,
                         p_euler_zoom=p_euler_z, p_euler_full=p_euler)
 end
