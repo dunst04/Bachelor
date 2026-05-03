@@ -30,9 +30,12 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
     a_max = 30.0        # maximum assets
     N_a = 500            # grid points
 
+    # Borrowing wedge
+    ω_b = 0.5              # extra interest paid by borrowers: r_borrow = r + ω_b
+
     #government
-    T = 0.0 #lump-sum tax
-    g = 0.004 #government spending
+    T = 0.3 #lump-sum tax
+    g = 0.32 #government spending
     s = T - g #government surplus
     
     # Non-uniform grid using polynomial expansion (as in NGM)
@@ -54,78 +57,85 @@ function egm_iteration(σ_old, model, r, w)
     3. Back out endogenous asset grid: a = (c + a' - wz)/(1+r)
     4. Interpolate back to exogenous grid
     """
-    @unpack N_a, N_z, a_vec, z_vec, P_z, β, u_prime, u_prime_inv, a_min, a_max, T = model
-    
+    @unpack N_a, N_z, a_vec, z_vec, P_z, β, u_prime, u_prime_inv, a_min, a_max, T, ω_b = model
+
     σ_new = zeros(N_a, N_z)
-    
+
     # Pre-compute interpolations for old policy to speed up the loop
     σ_interps = [LinearInterpolation(a_vec, σ_old[:, iz], extrapolation_bc=Line()) for iz in 1:N_z]
-    
+
     for (iz, z) in enumerate(z_vec)
         # Step 1: For each a' on grid, compute E[u'(c')] using old policy
         EMU_next = zeros(N_a)  # Expected marginal utility
-        
+
         for (ia_next, a_next) in enumerate(a_vec)
+            # Borrowers (a' < 0) face rate r + ω_b when a' is realized next period
+            r_eff_next = a_next < 0 ? r + ω_b : r
             for iz_next in 1:N_z
                 z_next = z_vec[iz_next]
-                
+
                 # Use pre-computed interpolation
                 a_next_next = σ_interps[iz_next](a_next)
-                
+
                 # Consumption tomorrow
-                c_next = (1+r)*a_next + w*z_next - T - a_next_next
-                
+                c_next = (1 + r_eff_next)*a_next + w*z_next - T - a_next_next
+
                 if c_next > 0
                     EMU_next[ia_next] += P_z[iz, iz_next] * u_prime(c_next)
                 end
             end
         end
-        
+
         # Step 2: Invert Euler equation to get consumption on endogenous grid
-        # u'(c) = β(1+r)E[u'(c')] => c = (u')^{-1}(β(1+r)E[u'(c')])
+        # u'(c) = β(1+r_eff(a'))E[u'(c')] => c = (u')^{-1}(β(1+r_eff(a'))E[u'(c')])
         c_endog = zeros(N_a)
         a_endog = zeros(N_a)
         valid = falses(N_a)
-        
+
         for (ia_next, a_next) in enumerate(a_vec)
             if EMU_next[ia_next] > 0
-                # Consumption from Euler equation
-                c_endog[ia_next] = u_prime_inv(β * (1+r) * EMU_next[ia_next])
-                
+                r_eff_next = a_next < 0 ? r + ω_b : r
+
+                # Consumption from Euler equation (return on a' depends on sign of a')
+                c_endog[ia_next] = u_prime_inv(β * (1 + r_eff_next) * EMU_next[ia_next])
+
                 # Step 3: Back out endogenous asset level today
-                # Budget: (1+r)*a + w*z = c + a'
-                # => a = (c + a' - w*z)/(1+r)
-                a_endog[ia_next] = (c_endog[ia_next] + a_next - w*z + T) / (1+r)
-                
-                valid[ia_next] = true 
+                # Budget: (1+r_eff(a))*a + w*z = c + a' + T
+                # Sign of K determines whether today's a is positive or negative
+                K = c_endog[ia_next] + a_next - w*z + T
+                r_eff_today = K >= 0 ? r : r + ω_b
+                a_endog[ia_next] = K / (1 + r_eff_today)
+
+                valid[ia_next] = true
             end
         end
-        
+
         # Step 4: Interpolate back to exogenous grid
         if sum(valid) >= 2
             # Sort by endogenous asset grid
             sorted_idx = sortperm(a_endog[valid])
             a_endog_sorted = a_endog[valid][sorted_idx]
             a_next_sorted = a_vec[valid][sorted_idx]
-            
+
             # Interpolation: given a (exogenous), what is a'?
             policy_interp = LinearInterpolation(a_endog_sorted, a_next_sorted, extrapolation_bc=Line())
-            
+
             for (ia, a) in enumerate(a_vec)
                 # Get policy from interpolation
                 a_next_candidate = policy_interp(a)
-                
+
                 # Ensure feasibility: can't save more than total resources
-                max_saving = (1+r)*a + w*z - 1e-10  # leave tiny bit for consumption
+                r_eff_a = a < 0 ? r + ω_b : r
+                max_saving = (1 + r_eff_a)*a + w*z - 1e-10  # leave tiny bit for consumption
                 a_next_candidate = clamp(a_next_candidate, a_min, min(max_saving, a_max))
-                
+
                 # Handle corner solution at borrowing constraint
                 # If current assets 'a' are less than the assets required to choose the
                 # lowest a' on the grid (typically a_min), then the constraint binds.
                 if a < a_endog_sorted[1]
                     a_next_candidate = a_min
                 end
-                
+
                 σ_new[ia, iz] = a_next_candidate
             end
         else
@@ -139,13 +149,14 @@ end
 
 function solve_hugget_egm(model, r, w; maxiter=1000, tol=1e-8, verbose=true)
     """Solve household problem using EGM for given prices."""
-    @unpack N_a, N_z, a_vec, z_vec = model
-    
+    @unpack N_a, N_z, a_vec, z_vec, ω_b = model
+
     # Initialize policy: save a constant fraction
     σ = zeros(N_a, N_z)
     for (iz, z) in enumerate(z_vec)
         for (ia, a) in enumerate(a_vec)
-            income = (1+r)*a + w*z
+            r_eff_a = a < 0 ? r + ω_b : r
+            income = (1 + r_eff_a)*a + w*z
             σ[ia, iz] = 0.3 * income  # save 30%
             σ[ia, iz] = clamp(σ[ia, iz], a_vec[1], a_vec[end])
         end
@@ -354,37 +365,39 @@ function euler_residuals(model, σ, r, w; test_grid=nothing)
     Euler equation: u'(c) = β(1+r) * E[u'(c')]
     Residual: percentage error in consumption implied by Euler equation
     """
-    @unpack a_vec, z_vec, P_z, N_z, β, u_prime, u_prime_inv, T = model
-    
+    @unpack a_vec, z_vec, P_z, N_z, β, u_prime, u_prime_inv, T, ω_b = model
+
     # Create test grid if not provided
     if isnothing(test_grid)
         test_grid = range(model.a_min + 0.01, model.a_max * 0.5, length=500)
     end
-    
+
     n_test = length(test_grid)
     residuals = zeros(n_test, N_z)
-    
+
     for (iz, z) in enumerate(z_vec)
         σ_interp = LinearInterpolation(a_vec, σ[:, iz], extrapolation_bc=Line())
-        
+
         for (ia, a) in enumerate(test_grid)
             a_next = σ_interp(a)
-            c = (1+r)*a + w*z - T - a_next
+            r_eff_a = a < 0 ? r + ω_b : r
+            c = (1 + r_eff_a)*a + w*z - T - a_next
 
             if c > 0
+                r_eff_next = a_next < 0 ? r + ω_b : r
                 euler_rhs = 0.0
                 for iz_next in 1:N_z
                     z_next = z_vec[iz_next]
                     σ_next_interp = LinearInterpolation(a_vec, σ[:, iz_next], extrapolation_bc=Line())
                     a_next_next = σ_next_interp(a_next)
-                    c_next = (1+r)*a_next + w*z_next - T - a_next_next
-                    
+                    c_next = (1 + r_eff_next)*a_next + w*z_next - T - a_next_next
+
                     if c_next > 0
                         euler_rhs += P_z[iz, iz_next] * u_prime(c_next)
                     end
                 end
-                
-                euler_rhs *= β * (1+r)
+
+                euler_rhs *= β * (1 + r_eff_next)
                 c_implied = u_prime_inv(euler_rhs)
                 residuals[ia, iz] = (c - c_implied) / c
             else
@@ -526,6 +539,11 @@ function plot_euler_residuals(model, σ, r, w; test_grid=nothing, title_suffix="
 end
 
 function solve_and_plot_equilibrium(model, r, w=1.0; verbose=true)
+        """
+        Solve the household problem for a single interest rate and display
+        the policy function, distributions, and Euler residuals in separate figures.
+        Returns a named tuple with all computed objects.
+        """
         label = "r*=$(round(r, digits=4))"
         verbose && println("\n--- $label ---")
 
@@ -544,114 +562,8 @@ function solve_and_plot_equilibrium(model, r, w=1.0; verbose=true)
         display(p_euler_z)
         display(p_euler)
 
-        return (r=r, σ=σ, λ=λ, λ_a=λ_a, λ_z=λ_z,
+        return (r=r, σ=σ, λ_a=λ_a, λ_z=λ_z,
                         p_policy=p_pol, p_dist_a=p_dist_a, p_dist_z=p_dist_z,
                         p_dist_a_zoom=p_dist_a_zoom,
                         p_euler_zoom=p_euler_z, p_euler_full=p_euler)
-end
-
-#functions for maximal deficit analysis
-
-function asset_test(model, r_min, r_max; w=1.0, r_const=0.7, n_neg=40, n_pos=6)
-    r_natural = 1 / model.β - 1
-    r_test_grid = vcat(range(r_min, r_max, length=n_neg),
-                       range(0.001, r_const * r_natural, length=n_pos))
-    r_test_grid = collect(r_test_grid)
-    mean_assets_test = zeros(length(r_test_grid))
-
-    println("Computing asset demand for different interest rates...")
-    for (i, r) in enumerate(r_test_grid)
-        print("  r = $(round(r, digits=4))... ")
-        σ_temp, _, _ = solve_hugget_egm(model, r, w, verbose=false)
-        _, _, λ_a_temp, _ = stationary_distribution(model, σ_temp)
-        mean_assets_test[i] = sum(model.a_vec .* λ_a_temp)
-        println("mean assets = $(round(mean_assets_test[i], digits=4))")
-    end
-
-    # Bond supply curve B(r) = s/r only exists for r < 0
-    negative_idx = r_test_grid .< 0
-    r_supply_grid = r_test_grid[negative_idx]
-    bond_supply_test = model.s ./ r_supply_grid
-
-    return r_natural, r_test_grid, mean_assets_test, negative_idx, r_supply_grid, bond_supply_test
-end
-
-function plot_assets(model, mean_assets_test, r_equilibria, r_test_grid, r_supply_grid, bond_supply_test, r_natural, negative_idx)
-    println("\n=== Finding Equilibria ===")
-
-    p = plot(mean_assets_test, collect(r_test_grid), title="s = $(round(model.s, digits=6))",
-             ylabel=L"r", xlabel=L"\mathcal{A}",
-             lw=2, color=:steelblue, legend=:bottomright, label="asset demand " * L"\mathcal{A}^d(r)",
-             guidefont=font(16), legendfont=font(10))
-    plot!(p, bond_supply_test, r_supply_grid,
-          lw=2, color=:tomato, linestyle=:dash, label="asset supply " * L"\mathcal{A}^s(r) = s/r")
-
-    for (k, r_eq) in enumerate(r_equilibria)
-        scatter!(p, [model.s / r_eq], [r_eq],
-                 markersize=4, color=:red, markershape=:circle,
-                 label="Eq. $k: " * L" r*" * "= $(round(r_eq, digits=4))", guidefont=font(12))
-    end
-
-    hline!(p, [r_natural], color=:purple, linestyle=:dot, lw=2,
-           label=L"r = \frac{1}{\beta} - 1" * " = $(round(r_natural, digits=4))")
-    hline!(p, [0], color=:gray, linestyle=:dot, lw=1, label=false)
-
-    return p
-end
-
-function find_maximal_deficit(r_supply_grid, demand_neg; s_lo=-0.004, s_hi=-0.005, tol=1e-6, max_iter=200)
-    println("\n=== Finding Maximal Deficit (Minimal s) via Bisection ===\n")
-    s_lo_b, s_hi_b = s_lo, s_hi
-    n_iter_s = 0
-    while abs(s_hi_b - s_lo_b) > tol
-        s_mid = (s_lo_b + s_hi_b) / 2
-        r_eq = find_equilibria(HuggettEGM(s=s_mid), r_supply_grid, demand_neg, verbose=false)
-        length(r_eq) == 2 ? (s_lo_b = s_mid) : (s_hi_b = s_mid)
-        n_iter_s += 1; n_iter_s >= max_iter && break
-    end
-    s_critical = (s_lo_b + s_hi_b) / 2
-    r_eq_crit  = find_equilibria(HuggettEGM(s=s_lo_b), r_supply_grid, demand_neg, verbose=false)
-    r_crit = mean(r_eq_crit)
-    println("Converged in $n_iter_s iterations")
-    @printf("Maximal deficit  -s* =  %.10f\n", -s_critical)
-    @printf("r*       ≈  %.6f\n\n", r_crit)
-    return s_critical, r_eq_crit, r_crit
-end
-
-### WELFARE ANALYSIS
-
-function compute_value_function(model, σ, r, w; maxiter=2000, tol=1e-8)
-    @unpack N_a, N_z, a_vec, z_vec, P_z, β, u, T = model
-    V = zeros(N_a, N_z)
-    for _ in 1:maxiter
-        V_interps = [LinearInterpolation(a_vec, V[:, iz], extrapolation_bc=Line()) for iz in 1:N_z]
-        V_new = zeros(N_a, N_z)
-        for iz in 1:N_z, ia in 1:N_a
-            c = (1+r)*a_vec[ia] + w*z_vec[iz] - T - σ[ia, iz]
-            c <= 0 && continue
-            ev = sum(P_z[iz, iz2] * V_interps[iz2](σ[ia, iz]) for iz2 in 1:N_z)
-            V_new[ia, iz] = u(c) + β * ev
-        end
-        maximum(abs.(V_new - V)) < tol && return V_new
-        V = V_new
-    end
-    return V
-end
-
-function compute_aggregate_welfare(λ, V)
-    return sum(λ .* V)
-end
-
-function welfare_cev(W1, W2, γ)
-    # solves (1+λ)^(1-γ) · W2 = W1 for λ
-
-    return (W1 / W2)^(1 / (1 - γ)) - 1
-end
-
-function solve_welfare(model, r, w=1.0)
-    σ, _, _ = solve_hugget_egm(model, r, w, verbose=false)
-    λ, _, λ_a, λ_z = stationary_distribution(model, σ)
-    V = compute_value_function(model, σ, r, w)
-    W = compute_aggregate_welfare(λ, V)
-    return (r=r, W=W, σ=σ, λ=λ, λ_a=λ_a, λ_z=λ_z, V=V)
 end
