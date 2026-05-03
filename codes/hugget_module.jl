@@ -554,3 +554,71 @@ function solve_and_plot_equilibrium(model, r, w=1.0; verbose=true)
                         p_dist_a_zoom=p_dist_a_zoom,
                         p_euler_zoom=p_euler_z, p_euler_full=p_euler)
 end
+
+#functions for maximal deficit analysis
+
+function asset_test(model, r_min, r_max; w=1.0, r_const=0.7, n_neg=40, n_pos=6)
+    r_natural = 1 / model.β - 1
+    r_test_grid = vcat(range(r_min, r_max, length=n_neg),
+                       range(0.001, r_const * r_natural, length=n_pos))
+    r_test_grid = collect(r_test_grid)
+    mean_assets_test = zeros(length(r_test_grid))
+
+    println("Computing asset demand for different interest rates...")
+    for (i, r) in enumerate(r_test_grid)
+        print("  r = $(round(r, digits=4))... ")
+        σ_temp, _, _ = solve_hugget_egm(model, r, w, verbose=false)
+        _, _, λ_a_temp, _ = stationary_distribution(model, σ_temp)
+        mean_assets_test[i] = sum(model.a_vec .* λ_a_temp)
+        println("mean assets = $(round(mean_assets_test[i], digits=4))")
+    end
+
+    # Bond supply curve B(r) = s/r only exists for r < 0
+    negative_idx = r_test_grid .< 0
+    r_supply_grid = r_test_grid[negative_idx]
+    bond_supply_test = model.s ./ r_supply_grid
+
+    return r_natural, r_test_grid, mean_assets_test, negative_idx, r_supply_grid, bond_supply_test
+end
+
+function plot_assets(model, mean_assets_test, r_equilibria, r_test_grid, r_supply_grid, bond_supply_test, r_natural, negative_idx)
+    println("\n=== Finding Equilibria ===")
+
+    p = plot(mean_assets_test, collect(r_test_grid), title="s = $(round(model.s, digits=6))",
+             ylabel=L"r", xlabel=L"\mathcal{A}",
+             lw=2, color=:steelblue, legend=:bottomright, label="asset demand " * L"\mathcal{A}^d(r)",
+             guidefont=font(16), legendfont=font(10))
+    plot!(p, bond_supply_test, r_supply_grid,
+          lw=2, color=:tomato, linestyle=:dash, label="asset supply " * L"\mathcal{A}^s(r) = s/r")
+
+    for (k, r_eq) in enumerate(r_equilibria)
+        scatter!(p, [model.s / r_eq], [r_eq],
+                 markersize=4, color=:red, markershape=:circle,
+                 label="Eq. $k: " * L" r*" * "= $(round(r_eq, digits=4))", guidefont=font(12))
+    end
+
+    hline!(p, [r_natural], color=:purple, linestyle=:dot, lw=2,
+           label=L"r = \frac{1}{\beta} - 1" * " = $(round(r_natural, digits=4))")
+    hline!(p, [0], color=:gray, linestyle=:dot, lw=1, label=false)
+
+    return p
+end
+
+function find_maximal_deficit(r_supply_grid, demand_neg; s_lo=-0.004, s_hi=-0.005, tol=1e-6, max_iter=200)
+    println("\n=== Finding Maximal Deficit (Minimal s) via Bisection ===\n")
+    s_lo_b, s_hi_b = s_lo, s_hi
+    n_iter_s = 0
+    while abs(s_hi_b - s_lo_b) > tol
+        s_mid = (s_lo_b + s_hi_b) / 2
+        r_eq = find_equilibria(HuggettEGM(s=s_mid), r_supply_grid, demand_neg, verbose=false)
+        length(r_eq) == 2 ? (s_lo_b = s_mid) : (s_hi_b = s_mid)
+        n_iter_s += 1; n_iter_s >= max_iter && break
+    end
+    s_critical = (s_lo_b + s_hi_b) / 2
+    r_eq_crit  = find_equilibria(HuggettEGM(s=s_lo_b), r_supply_grid, demand_neg, verbose=false)
+    r_crit = mean(r_eq_crit)
+    println("Converged in $n_iter_s iterations")
+    @printf("Maximal deficit  -s* =  %.10f\n", -s_critical)
+    @printf("r*       ≈  %.6f\n\n", r_crit)
+    return s_critical, r_eq_crit, r_crit
+end
