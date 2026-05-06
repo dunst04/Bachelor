@@ -4,6 +4,43 @@
 #takes around  7 minutes to run on shitty laptop
 include("hugget_module.jl")
 
+function plot_both_distributions(model, λ_a1, λ_a2; cdf_pct=0.99,
+                                  labels=["Eq. 1", "Eq. 2"], ylim_zoom=0.05)
+    cdf1 = cumsum(vec(λ_a1))
+    cdf2 = cumsum(vec(λ_a2))
+    idx1 = something(findfirst(x -> x >= cdf_pct, cdf1), length(cdf1))
+    idx2 = something(findfirst(x -> x >= cdf_pct, cdf2), length(cdf2))
+    idx_max = max(idx1, idx2)
+    a_max_plot = model.a_vec[idx_max]
+
+    p = plot(model.a_vec[1:idx_max], vec(λ_a1)[1:idx_max],
+             xlabel=L"a", ylabel=L"\mu_a(a)",
+             title="Asset Distribution ($(Int(cdf_pct*100))% CDF)",
+             label=labels[1], lw=2,
+             ylims=(0, ylim_zoom), xlims=(model.a_vec[1], a_max_plot),
+             guidefont=font(16))
+    plot!(p, model.a_vec[1:idx_max], vec(λ_a2)[1:idx_max],
+          label=labels[2], lw=2, linestyle=:dash)
+    return p
+end
+
+function plot_both_policies(model, σ1, σ2; a_plot_max=7.0, labels=["Eq. 1", "Eq. 2"])
+    iz_indices = [1, model.N_z ÷ 2 + 1, model.N_z]
+    z_labels   = ["Low z", "Mid z", "High z"]
+    colors     = [:steelblue, :darkorange, :seagreen]
+    plot_grid  = collect(range(model.a_min, a_plot_max, length=500))
+
+    p = plot(title="Policy Functions", xlabel=L"a", ylabel=L"a′", guidefont=font(16))
+    for (k, iz) in enumerate(iz_indices)
+        σ1_interp = LinearInterpolation(model.a_vec, σ1[:, iz], extrapolation_bc=Line())
+        σ2_interp = LinearInterpolation(model.a_vec, σ2[:, iz], extrapolation_bc=Line())
+        plot!(p, plot_grid, σ1_interp.(plot_grid), label="$(labels[1]) — $(z_labels[k])", color=colors[k], lw=2)
+        plot!(p, plot_grid, σ2_interp.(plot_grid), label="$(labels[2]) — $(z_labels[k])", color=colors[k], lw=2, linestyle=:dash)
+    end
+    plot!(p, plot_grid, plot_grid, label="45°", color=:black, linestyle=:dot)
+    return p
+end
+
 # Create model
 model = HuggettEGM(T=0.0, g=0.004)
 
@@ -48,19 +85,16 @@ r2, W2, σ2, λ2, λ_a2, λ_z2, V2 = solve_welfare(model, r_equilibria[2], w)
 
 welfare_cev(W2, W1, model.γ)
 
-r0 = find_equilibria(HuggettEGM(T=0.0, g=0.0), r_supply_grid, mean_assets_test[negative_idx])[1]
-r3, W3, σ3, λ3, λ_a3, λ_z3, V3 = solve_welfare(HuggettEGM(T=0.0, g=0.0), r0, w)
-r4, W4, σ4, λ4, λ_a4, λ_z4, V4 = solve_welfare(HuggettEGM(s=s_critical), r_crit, w)
+p_dist_both = plot_both_distributions(model, λ_a1, λ_a2)
+display(p_dist_both)
 
-welfare_cev(W4, W3, model.γ)
+p_pol_both = plot_both_policies(model, σ1, σ2)
+display(p_pol_both)
 
-p1, p2, p3 =plot_distributions(model, λ_a1, λ_z1)
-p4, p5, p6 =plot_distributions(model, λ_a2, λ_z2)
-plot(p3, p6)
-display(p3)
-display(p6)
-
-
-
-
-
+r1, W1, σ1, λ1, λ_a1, λ_z1, V1 = solve_welfare(HuggettEGM(s=s_critical), r_eq_crit[1], w)
+r2, W2, σ2, λ2, λ_a2, λ_z2, V2 = solve_welfare(HuggettEGM(s=s_critical), r_eq_crit[2], w)
+r3, W3, σ3, λ3, λ_a3, λ_z3, V3 = solve_welfare(HuggettEGM(s=s_critical), r_crit, w)
+welfare_cev(W1, W2, model.γ)
+p1 = plot_both_distributions(HuggettEGM(s=s_critical), λ_a1, λ_a3, labels=["Eq. 1", "Critical s"])
+p2 = plot_both_distributions(HuggettEGM(s=s_critical), λ_a2, λ_a3, labels=["Eq. 2", "Critical s"])
+plot(p1, p2)
