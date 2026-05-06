@@ -32,9 +32,8 @@ using Distributions, QuantEcon, Optim, Interpolations, LinearAlgebra, Statistics
 
     #government
     T = 0.0 #lump-sum tax
-    g = 0.004 #government spending
-    s = T - g #government surplus
-    
+    s = 0.0 #government surplus
+    g = T-s #primary surplus
     # Non-uniform grid using polynomial expansion (as in NGM)
     # Concentrates points near a_min where curvature is highest
     θ = 5.0              # curvature parameter (higher = more concentration at lower bound)
@@ -408,7 +407,7 @@ function plot_policy_function(model, σ; a_plot_max=5.0, title_suffix="")
     for iz in 1:model.N_z
         σ_interp = LinearInterpolation(model.a_vec, σ[:, iz], extrapolation_bc=Line())
         plot!(p, plot_grid, σ_interp.(plot_grid), 
-              label="z=$(round(model.z_vec[iz], digits=3))", 
+              label="y=$(round(model.z_vec[iz], digits=3))", 
               color=lines_scheme[iz], lw=2)
     end
     plot!(p, plot_grid, plot_grid, label="45°", color=:black, linestyle=:dash)
@@ -416,12 +415,12 @@ function plot_policy_function(model, σ; a_plot_max=5.0, title_suffix="")
     return p
 end
 
-function plot_distributions(model, λ_a, λ_z; r_label="", cdf_pct=0.99, ylim_zoom=0.05)
+function plot_distributions(model, λ_a, λ_y; r_label="", cdf_pct=0.99, ylim_zoom=0.05)
     """Plot asset and income distributions."""
     p1 = plot(model.a_vec, λ_a, xlabel=L"a", ylabel=L"\mu_a(a)",
             legend=false, lw=2, guidefont=font(16))
 
-    p2 = plot(model.z_vec, λ_z, xlabel=L"z", ylabel=L"\mu_z(z)",
+    p2 = plot(model.z_vec, λ_y, xlabel=L"y", ylabel=L"\mu_y(y)",
         legend=false, lw=2, linestyle=:dash, marker=:circle, guidefont=font(16))
 
         # Zoomed asset distribution: x-axis up to cdf_pct percentile, y-axis capped at ylim_zoom
@@ -595,6 +594,15 @@ function plot_assets(model, mean_assets_test, r_equilibria, r_test_grid, r_suppl
     hline!(p, [r_natural], color=:purple, linestyle=:dot, lw=2,
            label=L"r = \frac{1}{\beta} - 1" * " = $(round(r_natural, digits=4))")
     hline!(p, [0], color=:gray, linestyle=:dot, lw=1, label=false)
+    vline!(p, [0], color=:gray, linestyle=:dash, lw=1, label=false)
+
+    # r_bar: where asset demand crosses A = 0, found via find_equilibria with s=0
+    r_bar_vec = find_equilibria(HuggettEGM(s=0.0), r_test_grid, mean_assets_test, verbose=false)
+    if !isempty(r_bar_vec)
+        r_bar = r_bar_vec[1]
+        scatter!(p, [0.0], [r_bar], markersize=4, color=:black, markershape=:circle,
+                 label=L"\underbar{r}" * " = $(round(r_bar, digits=4))")
+    end
 
     return p
 end

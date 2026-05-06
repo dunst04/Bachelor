@@ -26,7 +26,7 @@ end
 
 function plot_both_policies(model, σ1, σ2; a_plot_max=7.0, labels=["Eq. 1", "Eq. 2"])
     iz_indices = [1, model.N_z ÷ 2 + 1, model.N_z]
-    z_labels   = ["Low z", "Mid z", "High z"]
+    z_labels   = ["Low y", "Mid y", "High y"]
     colors     = [:steelblue, :darkorange, :seagreen]
     plot_grid  = collect(range(model.a_min, a_plot_max, length=500))
 
@@ -42,7 +42,7 @@ function plot_both_policies(model, σ1, σ2; a_plot_max=7.0, labels=["Eq. 1", "E
 end
 
 # Create model
-model = HuggettEGM(T=0.0, g=0.004)
+model = HuggettEGM(T=0.0, s=-0.004)
 
 println("\n=== Huggett Model with Endogenous Grid Method ===\n")
 println("Parameters:")
@@ -61,7 +61,7 @@ w=1.0
 println("\n=== Computing Asset Demand Curve ===\n")
 
 r_natural, r_test_grid, mean_assets_test, negative_idx, r_supply_grid, bond_supply_test =
-    asset_test(model, -0.07, -0.001; w=w, r_const=0.7, n_neg=46)
+    asset_test(model, -0.06, -0.001; w=w, r_const=0.7, n_neg=46)
 
 r_equilibria = find_equilibria(model, r_supply_grid, mean_assets_test[negative_idx])
 
@@ -86,15 +86,16 @@ r2, W2, σ2, λ2, λ_a2, λ_z2, V2 = solve_welfare(model, r_equilibria[2], w)
 welfare_cev(W2, W1, model.γ)
 
 p_dist_both = plot_both_distributions(model, λ_a1, λ_a2)
-display(p_dist_both)
 
 p_pol_both = plot_both_policies(model, σ1, σ2)
-display(p_pol_both)
 
-r1, W1, σ1, λ1, λ_a1, λ_z1, V1 = solve_welfare(HuggettEGM(s=s_critical), r_eq_crit[1], w)
-r2, W2, σ2, λ2, λ_a2, λ_z2, V2 = solve_welfare(HuggettEGM(s=s_critical), r_eq_crit[2], w)
-r3, W3, σ3, λ3, λ_a3, λ_z3, V3 = solve_welfare(HuggettEGM(s=s_critical), r_crit, w)
-welfare_cev(W1, W2, model.γ)
-p1 = plot_both_distributions(HuggettEGM(s=s_critical), λ_a1, λ_a3, labels=["Eq. 1", "Critical s"])
-p2 = plot_both_distributions(HuggettEGM(s=s_critical), λ_a2, λ_a3, labels=["Eq. 2", "Critical s"])
-plot(p1, p2)
+
+r_bar = find_equilibria(HuggettEGM(T=0.0, s=0.0), r_supply_grid, mean_assets_test[negative_idx], w=w)
+r3, W3, σ3, λ3, λ_a3, λ_z3, V3 = solve_welfare(HuggettEGM(T=0.0, s=s_critical), r_crit, w)
+r4, W4, σ4, λ4, λ_a4, λ_z4, V4 = solve_welfare(HuggettEGM(T=0.0, s=0.0), r_bar[1], w)
+
+p_dist_crit = plot_both_distributions(model, λ_a3, λ_a4, labels=["s = $(round(s_critical, digits=5))", "s = 0.0"])
+
+p_pol_crit = plot_both_policies(model, σ3, σ4, labels=["s = $(round(s_critical, digits=5))", "s = 0.0"])
+
+welfare_cev(W3, W4, model.γ)
