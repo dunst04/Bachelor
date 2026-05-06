@@ -615,7 +615,7 @@ function find_maximal_deficit(r_supply_grid, demand_neg; s_lo=-0.004, s_hi=-0.00
     println("Converged in $n_iter_s iterations")
     @printf("Maximal deficit  -s* =  %.10f\n", -s_critical)
     @printf("r*       ≈  %.6f\n\n", r_crit)
-    return s_critical, r_eq_crit, r_crit
+    return s_critical, r_eq_crit, r_crit, s_lo_b, s_hi_b
 end
 
 ### WELFARE ANALYSIS
