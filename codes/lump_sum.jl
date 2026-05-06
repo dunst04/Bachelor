@@ -30,7 +30,7 @@ display(p_demand)
 ### MAXIMAL DEFICIT (MINIMAL s) VIA BISECTION
 
 demand_neg = mean_assets_test[negative_idx]
-s_critical, r_eq_crit, r_crit = find_maximal_deficit(r_supply_grid, demand_neg, s_lo = -0.02218, s_hi = -0.02219, tol=1e-5)
+s_critical, r_eq_crit, r_crit = find_maximal_deficit(r_supply_grid, demand_neg, s_lo = -0.0221850, s_hi = -0.0221851, tol=1e-7)
 
 bond_supply_critical = s_critical ./ r_supply_grid
 p_demand_critical = plot_assets(HuggettEGM(s=s_critical), mean_assets_test, r_eq_crit, r_test_grid, r_supply_grid, bond_supply_critical, r_natural, negative_idx)
