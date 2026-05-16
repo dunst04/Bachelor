@@ -1,7 +1,7 @@
 #Huggett model with lump sum taxes
 include("hugget_module.jl")
 
-model = HuggettEGM(T=0.3, g=0.32)
+model = HuggettEGM(T=0.3, s=-0.02)
 
 println("\n=== Huggett Model with Endogenous Grid Method ===\n")
 println("Parameters:")
